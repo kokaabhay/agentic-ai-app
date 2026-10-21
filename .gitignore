@@ -1,0 +1,29 @@
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs
+logs/*.log
+logs/*.log.*
+
+# Temporary runtime files
+runtime/workspaces/*
+!runtime/workspaces/.gitkeep
+
+# Generated Python bytecode
+agents/__pycache__/
+generated_tools/__pycache__/
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
