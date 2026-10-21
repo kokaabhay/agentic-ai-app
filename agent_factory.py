@@ -43,7 +43,7 @@ Return only Python source code, no markdown fences.
             {"role": "system", "content": "Generate only a safe declarative Python dictionary. Never include executable code."},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
+        temperature=1,
     )
     source = (response.choices[0].message.content or "").strip()
     if source.startswith("```"):

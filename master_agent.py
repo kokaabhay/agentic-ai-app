@@ -36,7 +36,7 @@ def _call_master(messages: list[dict]) -> dict:
         model=get_chat_deployment(),
         messages=messages,
         response_format={"type": "json_object"},
-        temperature=0.2,
+        temperature=1,
     )
     content = response.choices[0].message.content or "{}"
     return json.loads(content)

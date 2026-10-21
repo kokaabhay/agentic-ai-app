@@ -37,7 +37,7 @@ def run_agent(name: str, task: str, context: str = "") -> str:
         response = client.chat.completions.create(
             model=get_chat_deployment(),
             messages=messages,
-            temperature=0.2,
+            temperature=1,
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content or "{}"
