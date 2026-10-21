@@ -1,90 +1,68 @@
-
-from pathlib import Path
+import json
 import logging
-import shutil
+from pathlib import Path
+from config import BASE_DIR, PENDING_DIR, APPROVALS_DIR, AGENTS_DIR, GENERATED_TOOLS_DIR
+from security import validate_agent_source, validate_tool_spec, safe_child_path
 
-from config import BASE_DIR
-
-logger = logging.getLogger(__name__)
-
-PENDING_DIR = BASE_DIR / "runtime" / "pending"
+logger = logging.getLogger("agent_activity")
 PENDING_DIR.mkdir(parents=True, exist_ok=True)
+APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
 
+def save_pending_agent(name: str, source: str) -> dict:
+    spec = validate_agent_source(source)
+    if spec["name"] != name:
+        raise ValueError("Agent name does not match AGENT_SPEC.name.")
+    path = safe_child_path(PENDING_DIR, f"agent_{name}.py.pending")
+    path.write_text(source, encoding="utf-8")
+    meta = {"kind": "agent", "name": name, "pending_file": path.name}
+    (APPROVALS_DIR / f"agent_{name}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    logger.info("event=code_pending kind=agent name=%s", name)
+    return meta
 
-def save_pending_code(
-    filename: str,
-    source_code: str,
-) -> Path:
-    """Save generated code without activating it."""
+def save_pending_tool(spec: dict) -> dict:
+    spec = validate_tool_spec(spec)
+    path = safe_child_path(PENDING_DIR, f"tool_{spec['name']}.json.pending")
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    meta = {"kind": "tool", "name": spec["name"], "pending_file": path.name}
+    (APPROVALS_DIR / f"tool_{spec['name']}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    logger.info("event=code_pending kind=tool name=%s", spec["name"])
+    return meta
 
-    if Path(filename).name != filename:
-        raise ValueError("Only a filename is allowed")
+def list_pending() -> list[dict]:
+    result = []
+    for meta_path in sorted(APPROVALS_DIR.glob("*.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            pending = PENDING_DIR / meta["pending_file"]
+            if pending.exists():
+                result.append(meta)
+        except (OSError, ValueError, KeyError):
+            logger.exception("Could not read approval metadata file=%s", meta_path.name)
+    return result
 
-    if not filename.endswith(".py"):
-        raise ValueError("Generated files must end in .py")
-
-    pending_path = PENDING_DIR / filename
-    pending_path.write_text(
-        source_code,
-        encoding="utf-8",
-    )
-
-    logging.getLogger("agent_activity").info(
-        "event=code_saved_pending filename=%s",
-        filename,
-    )
-
-    return pending_path
-
-
-def approve_and_activate(
-    pending_path: Path,
-    destination_path: Path,
-) -> Path:
-    """Activate reviewed code after basic syntax validation."""
-
-    pending_path = pending_path.resolve()
-    destination_path = destination_path.resolve()
-
-    if not pending_path.is_relative_to(PENDING_DIR.resolve()):
-        raise ValueError("Pending file is outside the pending directory")
-
-    # Only approved project directories may receive generated files.
-    allowed_roots = [
-        (BASE_DIR / "agents").resolve(),
-        (BASE_DIR / "generated_tools").resolve(),
-    ]
-
-    if not any(
-        destination_path.is_relative_to(root)
-        for root in allowed_roots
-    ):
-        raise ValueError("Destination directory is not allowed")
-
-    if not pending_path.is_file():
-        raise FileNotFoundError(pending_path)
-
-    # Syntax validation does NOT prove that code is safe.
-    source = pending_path.read_text(encoding="utf-8")
-    compile(source, str(pending_path), "exec")
-
-    destination_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # Preserve an existing version for rollback.
-    if destination_path.exists():
-        backup_path = destination_path.with_suffix(
-            destination_path.suffix + ".bak"
-        )
-        shutil.copy2(destination_path, backup_path)
-
-    shutil.copy2(pending_path, destination_path)
-
-    logging.getLogger("agent_activity").info(
-        "event=code_activated destination=%s",
-        destination_path.name,
-    )
-
-    return destination_path
+def approve_pending(kind: str, name: str) -> dict:
+    if kind not in {"agent", "tool"}:
+        raise ValueError("kind must be 'agent' or 'tool'")
+    meta_path = APPROVALS_DIR / f"{kind}_{name}.json"
+    if not meta_path.is_file():
+        raise FileNotFoundError("No pending approval found.")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    pending = safe_child_path(PENDING_DIR, meta["pending_file"])
+    if kind == "agent":
+        source = pending.read_text(encoding="utf-8")
+        spec = validate_agent_source(source)
+        destination = safe_child_path(AGENTS_DIR, f"{name}.py")
+        # Existing versions are preserved as .bak.
+        if destination.exists():
+            destination.with_suffix(".py.bak").write_text(destination.read_text(encoding="utf-8"), encoding="utf-8")
+        destination.write_text(source, encoding="utf-8")
+    else:
+        spec = validate_tool_spec(json.loads(pending.read_text(encoding="utf-8")))
+        destination = safe_child_path(GENERATED_TOOLS_DIR, f"{name}.json")
+        if destination.exists():
+            destination.with_suffix(".json.bak").write_text(destination.read_text(encoding="utf-8"), encoding="utf-8")
+        destination.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    pending.unlink(missing_ok=True)
+    meta_path.unlink(missing_ok=True)
+    logger.info("event=code_approved kind=%s name=%s", kind, name)
+    return {"status": "approved", "kind": kind, "name": name, "file": str(destination.relative_to(BASE_DIR))}

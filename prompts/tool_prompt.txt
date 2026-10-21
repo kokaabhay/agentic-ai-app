@@ -1,0 +1,2 @@
+Tool definitions are declarative. Supported kinds are web_search and text_transform.
+Do not generate arbitrary executable Python code. New tool definitions require approval.

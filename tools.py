@@ -1,121 +1,72 @@
+"""Built-in and approved generated tool registry.
 
+Generated tools are declarative specs, not arbitrary Python source. This MVP
+supports a small set of safe tool kinds; add new kinds in execute_tool only
+after reviewing their implementation and permission requirements.
+"""
 import logging
-from typing import Any, Callable
-
+from typing import Any
 from ddgs import DDGS
+from config import AGENT_ALLOW_INTERNET, GENERATED_TOOLS_DIR
+from security import validate_name, validate_tool_spec
 
 logger = logging.getLogger(__name__)
 tool_logger = logging.getLogger("tool_activity")
 
-# Tool name -> tool implementation and description.
-TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
-
-
-def register_tool(
-    name: str,
-    description: str,
-) -> Callable:
-    """Register a function so approved agents can use it."""
-
-    def decorator(function: Callable) -> Callable:
-        if name in TOOL_REGISTRY:
-            raise ValueError(f"Tool already registered: {name}")
-
-        TOOL_REGISTRY[name] = {
-            "description": description,
-            "function": function,
-        }
-
-        logger.info("Registered tool: %s", name)
-        return function
-
-    return decorator
-
-
-@register_tool(
-    name="web_search",
-    description=(
-        "Search the public internet for information. "
-        "Input: query (string), max_results (integer, optional)."
-    ),
-)
-def web_search(
-    query: str,
-    max_results: int = 5,
-) -> list[dict[str, str]]:
-    """Search public websites and return concise result metadata."""
-
+def _web_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    if not AGENT_ALLOW_INTERNET:
+        raise PermissionError("Internet access is disabled by configuration.")
     if not query or not query.strip():
-        raise ValueError("Search query cannot be empty")
+        raise ValueError("query cannot be empty")
+    max_results = max(1, min(int(max_results), 8))
+    tool_logger.info("event=tool_started tool=web_search query_length=%d", len(query))
+    with DDGS() as client:
+        results = client.text(query, max_results=max_results)
+        return [{"title": str(x.get("title", "")), "url": str(x.get("href", "")), "snippet": str(x.get("body", ""))} for x in results]
 
-    max_results = max(1, min(max_results, 8))
+def _text_transform(text: str, operation: str = "uppercase") -> str:
+    if operation == "uppercase":
+        return text.upper()
+    if operation == "lowercase":
+        return text.lower()
+    if operation == "word_count":
+        return str(len(text.split()))
+    if operation == "reverse":
+        return text[::-1]
+    raise ValueError("Supported operations: uppercase, lowercase, word_count, reverse")
 
-    tool_logger.info(
-        "event=tool_started tool=web_search query_length=%d",
-        len(query),
-    )
+def get_available_tools(allowed_tools: set[str] | None = None) -> list[dict[str, str]]:
+    registry = {
+        "web_search": "Search the public web. Arguments: query, max_results (optional).",
+        "text_transform": "Transform text. Arguments: text, operation (uppercase/lowercase/word_count/reverse).",
+    }
+    for path in GENERATED_TOOLS_DIR.glob("*.json"):
+        try:
+            import json
+            spec = validate_tool_spec(json.loads(path.read_text(encoding="utf-8")))
+            registry[spec["name"]] = spec["description"]
+        except Exception:
+            logger.exception("Ignoring invalid generated tool file=%s", path.name)
+    if allowed_tools is not None:
+        registry = {k: v for k, v in registry.items() if k in allowed_tools}
+    return [{"name": name, "description": desc} for name, desc in registry.items()]
 
-    try:
-        with DDGS() as search_client:
-            results = search_client.text(
-                query,
-                max_results=max_results,
-            )
-
-            # Return only selected fields, not arbitrary objects.
-            cleaned_results = [
-                {
-                    "title": str(item.get("title", "")),
-                    "url": str(item.get("href", "")),
-                    "snippet": str(item.get("body", "")),
-                }
-                for item in results
-            ]
-
-        tool_logger.info(
-            "event=tool_completed tool=web_search result_count=%d",
-            len(cleaned_results),
-        )
-
-        return cleaned_results
-
-    except Exception:
-        # Avoid logging credentials or full request internals.
-        tool_logger.exception(
-            "event=tool_failed tool=web_search"
-        )
-        raise
-
-
-def get_available_tools() -> list[dict[str, str]]:
-    """Return tool descriptions without exposing implementation code."""
-
-    return [
-        {
-            "name": name,
-            "description": item["description"],
-        }
-        for name, item in TOOL_REGISTRY.items()
-    ]
-
-
-def execute_tool(
-    name: str,
-    arguments: dict[str, Any],
-    allowed_tools: set[str],
-) -> Any:
-    """Execute a tool only when the caller has been granted access."""
-
+def execute_tool(name: str, arguments: dict[str, Any], allowed_tools: set[str]) -> Any:
     if name not in allowed_tools:
-        raise PermissionError(
-            f"Access to tool '{name}' has not been granted"
-        )
-
-    if name not in TOOL_REGISTRY:
-        raise ValueError(f"Unknown tool: {name}")
-
-    tool = TOOL_REGISTRY[name]
-
+        raise PermissionError(f"Tool '{name}' is not granted to this agent.")
     tool_logger.info("event=tool_invoked tool=%s", name)
-
-    return tool["function"](**arguments)
+    if name == "web_search":
+        return _web_search(**arguments)
+    if name == "text_transform":
+        return _text_transform(**arguments)
+    # Generated tools map to reviewed built-in kinds only.
+    import json
+    path = GENERATED_TOOLS_DIR / f"{name}.json"
+    if not path.is_file():
+        raise ValueError(f"Unknown tool: {name}")
+    spec = validate_tool_spec(json.loads(path.read_text(encoding="utf-8")))
+    if spec["kind"] == "web_search":
+        return _web_search(**arguments)
+    if spec["kind"] == "text_transform":
+        return _text_transform(**arguments)
+    raise ValueError("Unsupported tool kind.")
