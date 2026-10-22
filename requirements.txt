@@ -3,3 +3,7 @@ openai
 python-dotenv
 pydantic
 ddgs
+pypdf 
+python-docx 
+openpyxl
+python-multipart
